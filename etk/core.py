@@ -41,6 +41,9 @@ import pickle
 import copy
 from collections import OrderedDict
 import sys
+import traceback
+import logging
+import logstash
 
 _KNOWLEDGE_GRAPH = "knowledge_graph"
 _EXTRACTION_POLICY = 'extraction_policy'
@@ -132,6 +135,20 @@ _KG_ENHANCEMENT = "kg_enhancement"
 _DOCUMENT_ID = "document_id"
 _TLD = 'tld'
 _FEATURE_COMPUTATION = "feature_computation"
+_LOGGING = "logging"
+_LOGSTASH = "logstash"
+_HOST = "host"
+_LOCALHOST = "localhost"
+_PORT = "port"
+_LEVEL = "level"
+_VERSION = "version"
+_CRITICAL = 50
+_ERROR = 40
+_WARNING = 30
+_INFO = 20
+_DEBUG = 10
+_EXCEPTION = 47
+_ETK_VERSION = "etk_version"
 
 
 class Core(object):
@@ -143,7 +160,7 @@ class Core(object):
         self.pickles = dict()
         self.jobjs = dict()
         self.global_extraction_policy = None
-        self.global_error_handling = None
+        self.global_error_handling = _RAISE_ERROR
         # to make sure we do not parse json_paths more times than needed, we define the following 2 properties
         self.content_extraction_path = None
         self.data_extraction_path = dict()
@@ -157,12 +174,50 @@ class Core(object):
         self.state_to_country_dict = None
         self.state_to_codes_lower_dict = None
         self.populated_cities = None
+        self.logstash_logger = None
+        self.etk_version = "1"
+        if self.extraction_config:
+            self.etk_version = self.extraction_config[_ETK_VERSION] if _ETK_VERSION in self.extraction_config else "1"
+            if _LOGGING in self.extraction_config:
+                logging_conf = self.extraction_config[_LOGGING]
+                if _LOGSTASH in logging_conf:
+                    logstash_conf = logging_conf[_LOGSTASH]
+                    self.logstash_logger = logging.getLogger('etk-logstash-logger')
+                    host = logstash_conf[_HOST] if _HOST in logstash_conf else _LOCALHOST
+                    port = logstash_conf[_PORT] if _PORT in logstash_conf else 5959
+                    self.logstash_logger.setLevel(logstash_conf[_LEVEL] if _LEVEL in logstash_conf else _ERROR)
+                    self.logstash_logger.addHandler(
+                        logstash.LogstashHandler(host, port, logstash_conf[_VERSION] if _VERSION in logging_conf else 1))
+
+    def log(self, message, level, doc_id=None, url=None, extra=None):
+        if self.logstash_logger:
+            if not extra:
+                extra = dict()
+            extra[_ETK_VERSION] = self.etk_version
+            if doc_id:
+                extra[_DOCUMENT_ID] = doc_id
+            if url:
+                extra[_URL] = url
+
+            if level == _ERROR:
+                self.logstash_logger.error(message, extra=extra)
+            elif level == _WARNING:
+                self.logstash_logger.warning(message, extra=extra)
+            elif level == _INFO:
+                self.logstash_logger.info(message, extra=extra)
+            elif level == _DEBUG:
+                self.logstash_logger.debug(message, extra=extra)
+            elif level == _CRITICAL:
+                self.logstash_logger.critical(message, extra=extra)
+            elif level == _EXCEPTION:
+                self.logstash_logger.exception(message, extra=extra)
+
 
     """ Define all API methods """
 
     def process(self, doc, create_knowledge_graph=False):
+        start_time = time.time()
         try:
-            # print 'Now Processing url: {}, doc_id: {}'.format(doc['url'], doc['doc_id'])
             if self.extraction_config:
                 doc_id = None
                 if _DOCUMENT_ID in self.extraction_config:
@@ -174,8 +229,16 @@ class Core(object):
                         raise KeyError('{} not found in the input document'.format(doc_id_field))
                 if _EXTRACTION_POLICY in self.extraction_config:
                     self.global_extraction_policy = self.extraction_config[_EXTRACTION_POLICY]
-                if _ERROR_HANDLING in self.extraction_config:
-                    self.global_error_handling = self.extraction_config[_ERROR_HANDLING]
+                error_handling = self.extraction_config[
+                    _ERROR_HANDLING] if _ERROR_HANDLING in self.extraction_config else _RAISE_ERROR
+                if error_handling != _RAISE_ERROR and error_handling != _IGNORE_DOCUMENT:
+                    warning = 'WARN: error handling in extraction config can either be \"{}\" or \"{}\".' \
+                          ' By default its value has been set to \"{}\"'.format(
+                        _RAISE_ERROR, _IGNORE_DOCUMENT, _RAISE_ERROR)
+                    print warning
+                    self.log(warning, _WARNING)
+                    error_handling = _RAISE_ERROR
+                self.global_error_handling = error_handling
 
                 """Handle content extraction first aka Phase 1"""
                 if _CONTENT_EXTRACTION in self.extraction_config:
@@ -191,27 +254,25 @@ class Core(object):
                         self.content_extraction_path = parse(html_path)
                         time_taken = time.time() - start_time
                         if self.debug:
-                            print 'time taken to process parse %s' % time_taken
+                            self.log('time taken to process parse %s' % time_taken, _DEBUG, doc_id=doc[_DOCUMENT_ID],
+                                     url=doc[_URL])
                     start_time = time.time()
                     matches = self.content_extraction_path.find(doc)
                     time_taken = time.time() - start_time
                     if self.debug:
-                        print 'time taken to process matches %s' % time_taken
+                        self.log('time taken to process matches %s' % time_taken, _DEBUG, doc_id=doc[_DOCUMENT_ID],
+                                 url=doc[_URL])
                     extractors = ce_config[_EXTRACTORS]
                     for index in range(len(matches)):
                         for extractor in extractors.keys():
                             if extractor == _READABILITY:
-                                # TODO REMOVE THIS HACK
-                                if len(matches[index].value) < 700000 and 'amigobulls.com' not in doc['url'] and 'kulakowka.com' not in doc['url']:
-                                    re_extractors = extractors[extractor]
-                                    if isinstance(re_extractors, dict):
-                                        re_extractors = [re_extractors]
-                                    for re_extractor in re_extractors:
-                                        doc[_CONTENT_EXTRACTION] = self.run_readability(doc[_CONTENT_EXTRACTION],
-                                                                                        matches[index].value,
-                                                                                        re_extractor)
-                                else:
-                                    print 'Large document not running READABILITY, doc_id: {}'.format(doc['doc_id'])
+                                re_extractors = extractors[extractor]
+                                if isinstance(re_extractors, dict):
+                                    re_extractors = [re_extractors]
+                                for re_extractor in re_extractors:
+                                    doc[_CONTENT_EXTRACTION] = self.run_readability(doc[_CONTENT_EXTRACTION],
+                                                                                    matches[index].value,
+                                                                                    re_extractor)
                             elif extractor == _TITLE:
                                 doc[_CONTENT_EXTRACTION] = self.run_title(doc[_CONTENT_EXTRACTION],
                                                                           matches[index].value,
@@ -267,20 +328,17 @@ class Core(object):
                                         if _SIMPLE_TOKENS_ORIGINAL_CASE not in match.value:
                                             match.value[_SIMPLE_TOKENS_ORIGINAL_CASE] = self.extract_tokens_from_crf(
                                                 match.value[_TOKENS_ORIGINAL_CASE])
-                                            # if _TOKENS not in match.value:
-                                            #     match.value[_TOKENS] = self.extract_crftokens(match.value[_TEXT])
-                                            # if _SIMPLE_TOKENS not in match.value:
-                                            #     match.value[_SIMPLE_TOKENS] = self.extract_tokens_from_crf(match.value[_TOKENS])
+
                                     fields = de_config[_FIELDS]
                                     for field in fields.keys():
+                                        run_extractor = True
+                                        full_path = str(match.full_path)
+                                        segment = self.determine_segment(full_path)
                                         if field != '*':
                                             """
                                                 Special case for inferlink extractions:
                                                 For eg, We do not want to extract name from inferlink_posting-date #DUH
                                             """
-                                            run_extractor = True
-                                            full_path = str(match.full_path)
-                                            segment = self.determine_segment(full_path)
                                             if _INFERLINK in full_path:
                                                 if field not in full_path:
                                                     run_extractor = False
@@ -385,7 +443,6 @@ class Core(object):
                                                                           extractors[extractor][_CONFIG])
                                                             if results:
                                                                 for f, res in results.items():
-                                                                    # extractors[extractor][_CONFIG][_FIELD_NAME] = f
                                                                     self.add_data_extraction_results(match.value, f,
                                                                                                      extractor,
                                                                                                      self.add_origin_info(
@@ -396,7 +453,7 @@ class Core(object):
                                                                     if create_knowledge_graph:
                                                                         self.create_knowledge_graph(doc, f, res)
                                                     else:
-                                                        print('method {} not found!'.format(extractor))
+                                                        self.log('method {} not found!'.format(extractor), _INFO)
 
                 """Optional Phase 3: Knowledge Graph Enhancement"""
                 if _KG_ENHANCEMENT in self.extraction_config:
@@ -489,11 +546,22 @@ class Core(object):
                     """ Add title and description as fields in the knowledge graph as well"""
                     doc = Core.rearrange_description(doc)
                     doc = Core.rearrange_title(doc)
+
         except Exception as e:
-            print e
-            print 'Failed doc:', doc['doc_id']
-            #raise e
-        # print 'DONE url: {}, doc_id: {}'.format(doc['url'], doc['doc_id'])
+            self.log('ETK process() Exception', _EXCEPTION, doc_id=doc[_DOCUMENT_ID], url=doc[_URL])
+            if self.global_error_handling == _RAISE_ERROR:
+                # exc_type, exc_value, exc_traceback = sys.exc_info()
+                # lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+                # print ''.join(lines)
+                raise e
+            else:
+                return None
+        time_taken = time.time() - start_time
+        if time_taken > 5:
+            extra = dict()
+            extra['time_taken'] = time_taken
+            self.log('Document: {} took {} seconds'.format(doc[_DOCUMENT_ID], str(time_taken)), _INFO,
+                     doc_id=doc[_DOCUMENT_ID], url=doc[_URL], extra=extra)
         return doc
 
     @staticmethod
@@ -752,7 +820,6 @@ class Core(object):
         else:
             pct = 0.5
         if field_name not in content_extraction or (field_name in content_extraction and ep == _REPLACE):
-            start_time = time.time()
             ifl_extractions = Core.extract_landmark(html, url, extraction_rules, pct)
 
             if isinstance(ifl_extractions, list):
@@ -761,9 +828,6 @@ class Core(object):
                 content_extraction[field_name] = dict()
                 content_extraction[field_name][_TEXT] = self.inferlink_posts_to_text(ifl_extractions)
             else:
-                time_taken = time.time() - start_time
-                if self.debug:
-                    print 'time taken to process landmark %s' % time_taken
                 if ifl_extractions and len(ifl_extractions.keys()) > 0:
                     content_extraction[field_name] = dict()
                     for key in ifl_extractions:
@@ -847,24 +911,18 @@ class Core(object):
         field_name = title_config[_FIELD_NAME] if _FIELD_NAME in title_config else _TITLE
         ep = self.determine_extraction_policy(title_config)
         if field_name not in content_extraction or (field_name in content_extraction and ep == _REPLACE):
-            start_time = time.time()
             extracted_title = self.extract_title(html)
             if extracted_title:
                 content_extraction[field_name] = extracted_title
-            time_taken = time.time() - start_time
-            if self.debug:
-                print 'time taken to process title %s' % time_taken
         return content_extraction
 
     def run_table_extractor(self, content_extraction, html, table_config):
         field_name = table_config[_FIELD_NAME] if _FIELD_NAME in table_config else _TABLE
         ep = self.determine_extraction_policy(table_config)
         if field_name not in content_extraction or (field_name in content_extraction and ep == _REPLACE):
-            start_time = time.time()
-            content_extraction[field_name] = self.extract_table(html)
-            time_taken = time.time() - start_time
-            if self.debug:
-                print 'time taken to process table %s' % time_taken
+            tables = self.extract_table(html, table_config)
+            if tables is not None:
+                content_extraction[field_name] = tables
         return content_extraction
 
     def run_readability(self, content_extraction, html, re_extractor):
@@ -878,11 +936,7 @@ class Core(object):
         if _FIELD_NAME in re_extractor:
             field_name = re_extractor[_FIELD_NAME]
         ep = self.determine_extraction_policy(re_extractor)
-        start_time = time.time()
         readability_text = self.extract_readability(html, options)
-        time_taken = time.time() - start_time
-        if self.debug:
-            print 'time taken to process readability %s' % time_taken
         if readability_text:
             if field_name not in content_extraction or (field_name in content_extraction and ep == _REPLACE):
                 content_extraction[field_name] = readability_text
@@ -987,27 +1041,6 @@ class Core(object):
         if pickle_name not in self.pickles:
             self.pickles[pickle_name] = self.load_pickle_file(self.get_pickle_file_name_from_config(pickle_name))
         return self.pickles[pickle_name]
-
-    def classify_table(self, d, config):
-        result = self.classify_table_(d, config)
-        # return self._relevant_text_from_context([], result, config[_FIELD_NAME])
-        return result
-
-    def classify_table_(self, d, config):
-        model = config['model']
-        sem_types = config['sem_types']
-        cl_model = self.load_pickle(model)
-        sem_types = self.load_json(sem_types)
-        tc = table_extractor.TableClassification(sem_types, cl_model)
-        l = tc.predict_label(d)
-        tarr = table_extractor.Toolkit.create_table_array(d)
-        table_extractor.Toolkit.clean_cells(tarr)
-        res = dict()
-        res['value'] = l[2]
-        res['all_labels'] = l
-        res['context'] = dict(start=0, end=0, input=d['fingerprint'], text=str(tarr))
-        res['tarr'] = tarr
-        return [res]
 
     def table_data_extractor(self, d, config):
         result = self.table_data_extractor_(d, config)
@@ -1242,7 +1275,14 @@ class Core(object):
     @staticmethod
     def _extract_phone(tokens, source_type, include_context, output_format):
         result = phone_extractor.extract(tokens, source_type, include_context, output_format)
-        return result if result else None
+        if isinstance(result, dict):
+            result = [result]
+        new_result = list()
+        for r in result:
+            val = r['value']
+            if len(val) <= 10 or val.startswith('+') or val.startswith('1'):
+                new_result.append(r)
+        return new_result if len(new_result) > 0 else None
 
     def extract_email(self, d, config):
         text = d[_TEXT]
@@ -1436,14 +1476,20 @@ class Core(object):
         # The object also has a method get_original_index() to retrieve index in faithful tokens
         return ft.filter_tokens(config)
 
-    def extract_table(self, html_doc):
-        return table_extractor.extract(html_doc)
-
-    # def extract_stock_tickers(self, doc):
-    #     return extract_stock_tickers(doc)
-
-    # def extract_spacy(self, doc):
-    #     return spacy_extractor.spacy_extract(doc)
+    def extract_table(self, d, config):
+        cl_tables = False
+        model = None,
+        sem_types = []
+        if _CONFIG in config:
+            config = config[_CONFIG]
+            if config['classify_tables'] == 'yes':
+                cl_tables = True
+                model = config['classification_model']
+                sem_types = config['sem_types']
+                sem_types = self.load_json(sem_types)
+                model = self.load_pickle(model)
+        te = table_extractor.TableExtraction(cl_tables, sem_types, model)
+        return te.extract(d)
 
     @staticmethod
     def extract_landmark(html, url, extraction_rules, threshold=0.5):
@@ -1492,7 +1538,7 @@ class Core(object):
             try:
                 self.country_code_dict = self.load_json_file(self.get_dict_file_name_from_config('country_code'))
             except:
-                raise '{} dictionary missing from resources'.format('country_code')
+                raise Exception('{} dictionary missing from resources'.format('country_code'))
 
         tokens_url = d[_SIMPLE_TOKENS]
         return self._relevant_text_from_context(tokens_url,
@@ -1513,11 +1559,6 @@ class Core(object):
         else:
             return None
         populated_places = geonames_extractor.get_populated_places(cities, self.geonames_dict)
-
-        # results = geonames_extractor.get_country_from_populated_places(populated_places)
-
-        # if results:
-        #     self.create_knowledge_graph(d, _COUNTRY , results)
 
         return populated_places
 
@@ -1581,10 +1622,10 @@ class Core(object):
                 raise ValueError('{} dictionary missing from resources'.format(_POPULATED_CITIES))
 
         try:
-            priori_lst = ['city_state_together_count', 'city_state_code_together_count',
-                          'city_country_together_count', 'city_state_separate_count',
-                          'city_country_separate_count', 'city_state_code_separate_count']
-            results = [[] for i in range(len(priori_lst) + 1)]
+            priori_lst = ['city_state_together', 'city_state_code_together',
+                          'city_country_together', 'city_state_separate',
+                          'city_country_separate', 'city_state_code_separate']
+            results = [[] for i in range(len(priori_lst)+1)]
             knowledge_graph = d[_KNOWLEDGE_GRAPH]
             if "populated_places" in knowledge_graph:
                 pop_places = knowledge_graph["populated_places"]
@@ -1612,7 +1653,11 @@ class Core(object):
                             for each_city in city_lst:
                                 if "context" in each_city:
                                     cities.append((each_city["origin"]["segment"],
-                                                   each_city["context"]["start"], each_city["context"]["end"]))
+                                        each_city["context"]["start"], each_city["context"]["end"]))
+                            if city_lst:
+                                document_id = each_city["origin"]["document_id"]
+                            else:
+                                document_id = ""
 
                     states = []
                     if country == "united states":
@@ -1646,33 +1691,43 @@ class Core(object):
                                                                 each_state_code["context"]["end"]))
 
                     if cities:
+                        segments = []
                         for a_city in cities:
                             for a_state in states:
                                 if a_city[0] == a_state[0] and a_city[1] != a_state[1] and (
                                         abs(a_city[2] - a_state[1]) < 3 or abs(a_city[1] - a_state[2]) < 3):
                                     city_state_together_count += 1
+                                    if a_city[0] not in segments:
+                                        segments.append(a_city[0])
                                 else:
                                     city_state_separate_count += 1
                             for a_state_code in state_codes:
                                 if a_city[0] == a_state_code[0] and a_city[1] != a_state_code[1] and a_state_code[1] - \
                                         a_city[2] < 3 and a_state_code[1] - a_city[2] > 0:
                                     city_state_code_together_count += 1
+                                    if a_city[0] not in segments:
+                                        segments.append(a_city[0])
                                 else:
                                     city_state_code_separate_count += 1
                             for a_country in countries:
                                 if a_city[0] == a_country[0] and a_city[1] != a_country[1] and (
                                         abs(a_city[2] - a_country[1]) < 5 or abs(a_city[1] - a_country[2]) < 3):
                                     city_country_together_count += 1
+                                    if a_city[0] not in segments:
+                                        segments.append(a_city[0])
                                 else:
                                     city_country_separate_count += 1
 
                         result = copy.deepcopy(pop_places[place][0])
-                        result['metadata']['city_state_together_count'] = city_state_together_count
-                        result['metadata']['city_state_separate_count'] = city_state_separate_count
-                        result['metadata']['city_state_code_together_count'] = city_state_code_together_count
-                        result['metadata']['city_state_code_separate_count'] = city_state_code_separate_count
-                        result['metadata']['city_country_together_count'] = city_country_together_count
-                        result['metadata']['city_country_separate_count'] = city_country_separate_count
+                        result['origin'] = dict()
+                        result['origin']['document_id'] = document_id
+                        result['origin']['method'] = 'create_city_state_country_triple'
+                        result['metadata']['city_state_together'] = city_state_together_count
+                        result['metadata']['city_state_separate'] = city_state_separate_count
+                        result['metadata']['city_state_code_together'] = city_state_code_together_count
+                        result['metadata']['city_state_code_separate'] = city_state_code_separate_count
+                        result['metadata']['city_country_together'] = city_country_together_count
+                        result['metadata']['city_country_separate'] = city_country_separate_count
                         for priori_idx, counter in enumerate(priori_lst):
                             if country == "united states":
                                 result_value = city + ',' + state
@@ -1683,16 +1738,41 @@ class Core(object):
                             if result['metadata'][counter] > 0:
                                 if priori_idx < 3:
                                     result['value'] = result_value + "-1.0"
+                                    result['origin']['score'] = 1.0
+                                    result['origin']['segment'] = counter + ' in'
+                                    for segment in segments:
+                                        result['origin']['segment'] = result['origin']['segment'] + ' ' + segment
                                 elif priori_idx < 5:
                                     result['value'] = result_value + "-0.8"
+                                    result['origin']['score'] = 0.8
+                                    result['origin']['segment'] = counter + ' in somewhere'
                                 else:
-                                    result['value'] = result_value + "-0.1"
+                                    result['value'] = result_value + "-0.3"
+                                    result['origin']['score'] = 0.3
+                                    result['origin']['segment'] = counter + ' in somewhere'
                                 results[priori_idx].append(result)
                                 break
                             else:
-                                if priori_idx == 5 and city in self.populated_cities:
-                                    result['value'] = result_value + "-0.1"
-                                    results[priori_idx + 1].append(result)
+                                if isinstance(self.populated_cities, dict):
+                                    if priori_idx == 5 and city in self.populated_cities:
+                                        if self.populated_cities[city]["country"] == country:
+                                            if "state" in self.populated_cities[city]:
+                                                if self.populated_cities[city]["state"] == state:
+                                                    result['value'] = result_value + "-0.1"
+                                                    result['origin']['score'] = 0.1
+                                                    result['origin']['segment'] = 'none'
+                                                    results[priori_idx+1].append(result)
+                                            else:
+                                                result['value'] = result_value + "-0.1"
+                                                result['origin']['score'] = 0.1
+                                                result['origin']['segment'] = 'none'
+                                                results[priori_idx + 1].append(result)
+                                else:
+                                    if priori_idx == 5 and city in self.populated_cities:
+                                        result['value'] = result_value + "-0.1"
+                                        result['origin']['score'] = 0.1
+                                        result['origin']['segment'] = 'none'
+                                        results[priori_idx + 1].append(result)
 
             return_result = None
             for priori in range(len(priori_lst) + 1):
@@ -1713,5 +1793,5 @@ class Core(object):
             return return_result
 
         except Exception as e:
-            print e
+            self.log('Exception in create_city_state_country_triple()', _EXCEPTION, url=d[_URL], doc_id=d[_DOCUMENT_ID])
             return None
