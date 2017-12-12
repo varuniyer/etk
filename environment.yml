@@ -57,4 +57,4 @@ dependencies:
   - scipy
   - numpy
   - python-logstash>=0.4.6
-  - digIndicators>=1.1.8
+  - digIndicators>=1.1.9

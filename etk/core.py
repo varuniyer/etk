@@ -29,6 +29,7 @@ from data_extractors.digReviewIDExtractor import review_id_extractor
 from data_extractors import date_parser
 from classifiers import country_classifier
 from structured_extractors import ReadabilityExtractor, TokenizerExtractor, FaithfulTokenizerExtractor
+from digIndicators import indicators
 import json
 import gzip
 import re
@@ -237,6 +238,7 @@ class Core(object):
                     self.logstash_logger.addHandler(
                         logstash.LogstashHandler(host, port,
                                                  logstash_conf[_VERSION] if _VERSION in logging_conf else 1))
+        self.dig_i = None
 
     def log(self, message, level, doc_id=None, url=None, extra=None):
         if self.logstash_logger:
@@ -2200,7 +2202,6 @@ class Core(object):
             result = dict()
             result['@timestamp_created'] = timestamp_created
 
-            # result[_PARENT_DOC_ID] = parent_doc_id
             result[_CREATED_BY] = 'etk'
             if url:
                 result[_URL] = url
@@ -2234,3 +2235,21 @@ class Core(object):
             doc['nested_docs'].append(result)
             extractions.append({'value': doc_id, 'metadata': {'timestamp_created': timestamp_created}})
         return extractions
+
+    def dig_indicators(self, d, config):
+        if 'fasttext_model' not in config:
+            raise KeyError('model: \'{}\' not found in config'.format('fasttext_model'))
+
+        fasttext_model_path = config['fasttext_model']
+        incall_model_path = config['incall_model'] if 'incall_model' in config else None
+        outcall_model_path = config['outcall_model'] if 'outcall_model' in config else None
+        movement_model_path = config['movement_model'] if 'movement_model' in config else None
+        multi_model_path = config['multi_model'] if 'multi_model' in config else None
+        risky_model_path = config['risky_model'] if 'risky_model' in config else None
+        if not self.dig_i:
+            self.dig_i = indicators.DigIndicators(fasttext_model_path, incall_model_path=incall_model_path,
+                                                  outcall_model_path=outcall_model_path,
+                                                  movement_model_path=movement_model_path,
+                                                  multi_model_path=multi_model_path, risky_model_path=risky_model_path)
+        return self._relevant_text_from_context(d[_TEXT], self.dig_i.indicators(d[_TEXT]), config[_FIELD_NAME])
+       
