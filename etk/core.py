@@ -508,7 +508,6 @@ class Core(object):
                                                             ep = self.determine_extraction_policy(extractors[extractor])
                                                             if extractor == _CREATE_KG_NODE_EXTRACTOR:
                                                                 method = _CREATE_KG_NODE_EXTRACTOR
-                                                                # TODO Figure out how will users pass a doc_id for the
                                                                 # resulting nested kg doc
                                                                 segment = str(match.full_path)
                                                                 results = self.create_kg_node_extractor(match.value,
@@ -970,12 +969,12 @@ class Core(object):
             if metadata:
                 provenance['qualifiers'] = metadata
             doc[_KNOWLEDGE_GRAPH][field_name] = Core.add_extraction_knowledge_graph(
-                doc[_KNOWLEDGE_GRAPH][field_name], provenance, key, value)
+                doc[_KNOWLEDGE_GRAPH][field_name], provenance, key, value, confidence if confidence else 1)
 
         return doc
 
     @staticmethod
-    def add_extraction_knowledge_graph(kg_extractions, provenance, key, value):
+    def add_extraction_knowledge_graph(kg_extractions, provenance, key, value, confidence=1):
         if len(kg_extractions) > 0:
             for kg_e in kg_extractions:
                 if key == kg_e['key']:
@@ -986,7 +985,7 @@ class Core(object):
         kg_extraction['provenance'] = [provenance]
         kg_extraction['value'] = value
         kg_extraction['key'] = key
-        kg_extraction['confidence'] = 1
+        kg_extraction['confidence'] = confidence
         kg_extractions.append(kg_extraction)
         return kg_extractions
 
@@ -1049,6 +1048,8 @@ class Core(object):
             if not isinstance(results, list):
                 results = [results]
             for result in results:
+                if 'score' in result:
+                    score = result['score']
                 o = dict()
                 o['segment'] = segment
                 o['method'] = method
@@ -1281,8 +1282,6 @@ class Core(object):
                             ' '.join(text_or_tokens[new_start:start]).encode('utf-8'),
                             relevant_text,
                             ' '.join(text_or_tokens[end:new_end]).encode('utf-8'))
-                        # result['context']['tokens_left'] = text_or_tokens[new_start:start]
-                        # result['context']['tokens_right'] = text_or_tokens[end:new_end]
                         result['context']['input'] = _TOKENS
         return results
 
@@ -2236,7 +2235,7 @@ class Core(object):
             extractions.append({'value': doc_id, 'metadata': {'timestamp_created': timestamp_created}})
         return extractions
 
-    def dig_indicators(self, d, config):
+    def extract_dig_indicators(self, d, config):
         if 'fasttext_model' not in config:
             raise KeyError('model: \'{}\' not found in config'.format('fasttext_model'))
 
@@ -2251,5 +2250,5 @@ class Core(object):
                                                   outcall_model_path=outcall_model_path,
                                                   movement_model_path=movement_model_path,
                                                   multi_model_path=multi_model_path, risky_model_path=risky_model_path)
+
         return self._relevant_text_from_context(d[_TEXT], self.dig_i.indicators(d[_TEXT]), config[_FIELD_NAME])
-       
