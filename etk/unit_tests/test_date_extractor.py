@@ -10,6 +10,42 @@ de = DateExtractor(ETK(kg_schema=kg_schema), 'unit_test_date')
 
 
 class TestDateExtractor(unittest.TestCase):
+    # auxiliary method
+    @staticmethod
+    def convert_to_iso_format(date: datetime.datetime, resolution: DateResolution = DateResolution.DAY) -> str or None:
+        """
+
+        Args:
+            date: datetime.datetime - datetime object to convert
+            resolution: resolution of the iso format date to return
+
+        Returns: string of iso format date
+
+        """
+        # TODO: currently the resolution is specified by the user, should it be decided what we have extracted,
+        # E.g.: like if only year exists, use DateResolution.YEAR as resolution
+        try:
+            if date:
+                date_str = date.isoformat()
+                length = len(date_str)
+                if resolution == DateResolution.YEAR and length >= 4:
+                    return date_str[:4]
+                elif resolution == DateResolution.MONTH and length >= 7:
+                    return date_str[:7]
+                elif resolution == DateResolution.DAY and length >= 10:
+                    return date_str[:10]
+                elif resolution == DateResolution.HOUR and length >= 13:
+                    return date_str[:13]
+                elif resolution == DateResolution.MINUTE and length >= 16:
+                    return date_str[:16]
+                elif resolution == DateResolution.SECOND and length >= 19:
+                    return date_str[:19]
+                return date_str
+        except Exception as e:
+            return None
+
+        return None
+
     def test_ground_truth(self) -> None:
         with open('etk/unit_tests/ground_truth/date_ground_truth.txt', 'r') as f:
             texts = f.readlines()
@@ -39,7 +75,17 @@ class TestDateExtractor(unittest.TestCase):
                                    date_value_resolution=DateResolution.SECOND
                                    if format and len(format) > 1 and format[1] in ['H', 'I'] else DateResolution.DAY
                                    )
-                    expected = expected.replace('@today', DateExtractor.convert_to_iso_format(datetime.datetime.now()))
+                    expected = expected.replace('@today', self.convert_to_iso_format(datetime.datetime.now()))
+                    if expected.startswith('@recentYear'):
+                        today = datetime.datetime.now()
+                        expected = expected.replace('@recentYear', str(today.year))
+                        date = datetime.datetime.strptime(expected, '%Y-%m-%d')
+                        next_year = date.replace(year=today.year+1)
+                        last_year = date.replace(year=today.year-1)
+                        if date > today and (date-today > today-last_year):
+                            expected = str(last_year.year) + expected[4:]
+                        elif date < today and (today-date > next_year-today):
+                            expected = str(next_year.year) + expected[4:]
                     if expected and expected[0] != '@':
                         self.assertEqual(e[0].value if e else '', expected)
 
@@ -53,14 +99,16 @@ class TestDateExtractor(unittest.TestCase):
         results_with_default = [e.value for e in extractions_with_default]
         results_without_default = [e.value for e in extractions_without_default]
 
-        expected_with_default = ['2018-03-25', '2018-07-29', '2018-04-03', '2009-10-23', '2017-06-27', '1991-08-03', '2018-07-08']
+        expected_with_default = ['2018-03-25', '2018-07-29', '2018-04-03', '2009-10-23', '2017-06-27',
+                                 '1991-08-03', '2018-07-08']
         expected_without_default = ['2018-03-25', '2018-07-29', '2018-04-03', '1991-08-03', '2018-07-08']
 
         self.assertEqual(results_with_default, expected_with_default)
         self.assertEqual(results_without_default, expected_without_default)
 
     def test_relative_date(self) -> None:
-        text = '5 days ago, in two months, last year, yesterday, the day after tomorrow  2009-10-23 Jun 27 2017'
+        text = '5 days ago, in two months, last year, yesterday, the day after tomorrow  ' \
+               '2009-10-23 Jun 27 2017, what happened today'
         base = datetime.datetime(2018, 1, 1, tzinfo=pytz.timezone('UTC'))
         today = datetime.datetime.now()
 
@@ -70,10 +118,11 @@ class TestDateExtractor(unittest.TestCase):
         results_with_base = [e.value for e in extractions_with_base]
         results_base_today = [e.value for e in extractions_base_tody]
 
-        relative = [relativedelta(days=-5), relativedelta(months=2), relativedelta(years=-1), relativedelta(days=-1), relativedelta(days=2)]
+        relative = [relativedelta(days=-5), relativedelta(months=2), relativedelta(years=-1), relativedelta(days=-1),
+                    relativedelta(days=2), relativedelta(days=0)]
 
-        expected_with_base = ['2009-10-23', '2017-06-27'] + [de.convert_to_iso_format(base + x) for x in relative]
-        expected_base_today = ['2009-10-23', '2017-06-27'] + [de.convert_to_iso_format(today + x) for x in relative]
+        expected_with_base = ['2009-10-23', '2017-06-27'] + [self.convert_to_iso_format(base + x) for x in relative]
+        expected_base_today = ['2009-10-23', '2017-06-27'] + [self.convert_to_iso_format(today + x) for x in relative]
 
         self.assertEqual(results_with_base, expected_with_base)
         self.assertEqual(results_base_today, expected_base_today)
@@ -131,6 +180,25 @@ class TestDateExtractor(unittest.TestCase):
         results = [e.value for e in extractions]
 
         expected = ['2019-10-23', '2017-06', '2018-03-10T10:12', '2018-07', '2000-03', '2020']
+
+        self.assertEqual(results, expected)
+
+    def test_corner_cases(self) -> None:
+        text='That star is MARS. ' \
+             'It happened in 2012.' \
+             'he may go to his hometown' \
+             '13X or the ratio is 69/44  ' \
+             'I was born in 94/10 ' \
+             'I will take vocation on 12/23'
+
+        extractions = de.extract(text=text, date_value_resolution=DateResolution.ORIGINAL, prefer_dates_from='future')
+
+        results = [e.value for e in extractions]
+        today = datetime.datetime.now()
+        year = today.year
+        if datetime.datetime(datetime.datetime.now().year, 12, 23) < today:
+            year += 1
+        expected = ['2012', '1994-10', '%d-12-23' % year]
 
         self.assertEqual(results, expected)
 

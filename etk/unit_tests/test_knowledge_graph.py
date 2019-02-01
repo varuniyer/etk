@@ -78,6 +78,14 @@ class TestKnowledgeGraph(unittest.TestCase):
         except KgValueError:
             pass
 
+        try:
+            sample_doc.kg.add_value("test_non_empty", value="")
+            sample_doc.kg.add_value("test_non_empty", value="non-empty")
+            sample_doc.kg.add_value("test_empty", value="", keep_empty=True)
+            sample_doc.kg.add_value("test_empty", value="empty", keep_empty=True)
+        except KgValueError:
+            pass
+
         expected_developers = [
             {
                 "value": "dongyu",
@@ -134,10 +142,19 @@ class TestKnowledgeGraph(unittest.TestCase):
             }
         ]
 
+        expected_non_empty = [{"key": "non-empty", "value": "non-empty"}]
+        expected_empty = [{"key": "", "value": ""}, {"key": "empty", "value": "empty"}]
+
         self.assertEqual(expected_developers, sample_doc.kg.value["developer"])
         self.assertEqual(expected_date, sample_doc.kg.value["test_date"])
         self.assertEqual(expected_location, sample_doc.kg.value["test_location"])
         self.assertEqual(expected_add_value_date, sample_doc.kg.value["test_add_value_date"])
+        self.assertEqual(expected_non_empty, sample_doc.kg.value["test_non_empty"])
+        self.assertEqual(expected_empty, sample_doc.kg.value["test_empty"])
+
+    def test_add_value_empty(self):
+        self.doc.kg.add_value('test_zero', 0.0)
+        self.assertEqual(self.doc.kg.value['test_zero'][0]['value'], 0.0)
 
 
 class TestKnowledgeGraphWithOntology(unittest.TestCase):

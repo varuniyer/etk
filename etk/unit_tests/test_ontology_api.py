@@ -44,24 +44,27 @@ class TestOntologyAPI(unittest.TestCase):
 
     def test_property_domain(self):
         rdf_content = rdf_prefix + '''
-:Entity a owl:Class
-    .
-:Type a owl:Class
-    .
+:Entity a owl:Class .
+:Type a owl:Class .
+:Place a owl:Class .
 :Other a owl:Class ;
-    :common_properties :code
-    .
+    :common_properties :code .
 :code a owl:DatatypeProperty ;
-    rdfs:domain :Type ;
-    schema:domainIncludes :Entity
-    .
+    rdfs:domain [
+        a owl:Class ;
+        owl:unionOf (
+            :Type
+            :Place
+        )
+    ] ;
+    schema:domainIncludes :Entity .
         '''
         ontology = Ontology(rdf_content)
         property_code = ontology.get_entity(DIG.code.toPython())
         self.assertIsInstance(property_code, OntologyDatatypeProperty)
-        self.assertEqual(len(property_code.included_domains()), 3)
+        self.assertEqual(len(property_code.included_domains()), 4)
         self.assertSetEqual(property_code.included_domains(),
-                            set(map(ontology.get_entity, map(str, (DIG.Entity, DIG.Type, DIG.Other)))))
+                            set(map(ontology.get_entity, map(str, (DIG.Entity, DIG.Type, DIG.Other, DIG.Place)))))
 
     def test_datatype_property_range(self):
         rdf_content = rdf_prefix + '''
@@ -83,7 +86,7 @@ class TestOntologyAPI(unittest.TestCase):
 
     def test_inverse_object_property(self):
         rdf_content = rdf_prefix + '''
-:moved_to a owl:ObjectProperty ;
+:moved_to a owl:ObjectProperty, rdf:Property ;
     :inverse :was_destination_of .
         '''
         ontology = Ontology(rdf_content)
@@ -387,45 +390,117 @@ class TestOntologyAPI(unittest.TestCase):
         self.assertFalse(ontology.is_valid('region', 1, json.loads(kg)))
         self.assertFalse(ontology.is_valid('region', True, json.loads(kg)))
 
-    def test_ontology_api_is_valid_with_kg(self):
+    def test_ontology_schema_org(self):
         import json
 
         rdf_content = rdf_prefix + '''
-:Human a owl:Class ; .
-:Place a owl:Class ;
-    :common_properties :region ; .
-:region a owl:DatatypeProperty ;
-    schema:domainIncludes :Place ;
-    schema:rangeIncludes xsd:string ; .
-            '''
+        schema:Person a owl:Class ; .
+        schema:relatedTo
+              a rdf:Property ;
+              schema:domainIncludes schema:Person ;
+              schema:rangeIncludes schema:Person .
+        '''
         kg = '''
-{
-  "@type": ["dig:Place"],
-  "@id": "some_doc_id",
-  "@context": {
-    "dig": "http://dig.isi.edu/ontologies/dig/"
-  }
-}
+        {
+          "@type": ["http://schema.org/Person"],
+          "@id": "person1",
+          "http://schema.org/relatedTo": {
+            "@type": ["http://schema.org/Person"],
+            "@id": "person2"
+          }
+        }
         '''
-        kg_wrong_domain = '''
-{
-  "@type": ["dig:Human"],
-  "@id": "some_doc_id",
-  "@context": {
-    "dig": "http://dig.isi.edu/ontologies/dig/"
-  }
-}
-        '''
-        kg_domain_doesnt_exist = '''
-{
-  "@type": ["dig:People"],
-  "@id": "some_doc_id",
-  "@context": {
-    "dig": "http://dig.isi.edu/ontologies/dig/"
-  }
-}
-        '''
+
         ontology = Ontology(rdf_content)
-        self.assertTrue(ontology.is_valid('region', 'somewhere', json.loads(kg)))
-        self.assertFalse(ontology.is_valid('region', 'somewhere', json.loads(kg_wrong_domain)))
-        self.assertFalse(ontology.is_valid('region', 'somewhere', json.loads(kg_domain_doesnt_exist)))
+        for entity in ontology.all_classes():
+            self.assertIsInstance(entity, OntologyEntity)
+            self.assertIsInstance(entity, OntologyClass)
+        self.assertEqual(len(ontology.all_properties()), 1)
+
+        kg_json = json.loads(kg)
+        config = ontology.merge_with_master_config(kg_json,
+                                                   delete_orphan_fields=True)
+        self.assertTrue('fields' in config)
+        fields = config['fields']
+        self.assertIn('relatedTo', fields)
+        #
+        self.assertTrue(ontology.is_valid('schema:relatedTo',
+                                          kg_json["http://schema.org/relatedTo"],
+                                          kg_json))
+
+    def test_ontology_schema_org_datatype(self):
+        import json
+
+        rdf_content = rdf_prefix + '''
+        schema:Person a owl:Class ; .
+        schema:Text a schema:DataType, rdfs:Class ; .
+        schema:name
+              a rdf:Property ;
+              schema:domainIncludes schema:Person ;
+              schema:rangeIncludes schema:Person .
+        '''
+        kg = '''
+        {
+          "@type": ["http://schema.org/Person"],
+          "@id": "person1",
+          "http://schema.org/name": "Person Name"
+        }
+        '''
+
+        ontology = Ontology(rdf_content)
+        for entity in ontology.all_classes():
+            self.assertIsInstance(entity, OntologyEntity)
+            self.assertIsInstance(entity, OntologyClass)
+        self.assertEqual(len(ontology.all_properties()), 1)
+
+        return_value = ontology.is_valid('schema:name',
+                                          "person name1",
+                                          json.loads(kg))
+        self.assertEqual(return_value, {'@id': 'person name1'})
+
+        rdf_content = rdf_prefix + '''
+                schema:Person a owl:Class ; .
+                schema:DataType a owl:Class ; .
+                schema:Text a schema:DataType, owl:Class ; .
+                schema:name
+                      a rdf:Property ;
+                      schema:domainIncludes schema:Person ;
+                      schema:rangeIncludes schema:Text .
+                '''
+        ontology = Ontology(rdf_content)
+        kg = '''
+                {
+                  "@type": ["http://schema.org/Person"],
+                  "@id": "person1",
+                  "http://schema.org/name": "Person Name"
+                }
+                '''
+        return_value = ontology.is_valid('schema:name',
+                                         "person name1",
+                                         json.loads(kg))
+        self.assertEqual(return_value, {'@value': 'person name1'})
+
+    def test_ontology_condensed_json(self):
+        import json
+
+        rdf_content = rdf_prefix + '''
+                schema:Person a owl:Class ; .
+                schema:DataType a owl:Class ; .
+                schema:Text a schema:DataType, owl:Class ; .
+                schema:name
+                      a rdf:Property ;
+                      schema:domainIncludes schema:Person ;
+                      schema:rangeIncludes schema:Text .
+                '''
+        ontology = Ontology(rdf_content, expanded_jsonld=False)
+        kg = '''
+                {
+                  "@type": ["http://schema.org/Person"],
+                  "@id": "person1",
+                  "http://schema.org/name": "Person Name"
+                }
+                '''
+        return_value = ontology.is_valid('schema:name',
+                                         "person name1",
+                                         json.loads(kg))
+        self.assertEqual(return_value, 'person name1')

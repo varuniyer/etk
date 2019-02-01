@@ -17,6 +17,15 @@
     },
     "segment": {
       "type": "string"
+    },
+    "test_non_empty": {
+      "type": "string"
+    },
+    "test_empty": {
+      "type": "string"
+    },
+    "test_zero": {
+      "type": "number"
     }
   }
 }
